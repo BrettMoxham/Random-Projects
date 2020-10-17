@@ -1,0 +1,290 @@
+---
+title: "Consumer Data - Exploratory Data Analysis"
+author: "Brett Moxham"
+date: "26/09/2020"
+output: 
+  html_document:
+    code_folding: hide
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate) #used to parse date and time in our data cleaning step.
+library(gt)
+```
+
+
+# Objective
+
+**Taking the data set provided by the [UCI Machine Learning Repository](https://archive.ics.uci.edu/ml/datasets/online+retail#), we want to take an exploratory data analysis approach to gain insights into this store's customer.**  This data set contains transactions occurring between 01/12/2010 and 09/12/2011 for a UK-based and registered non-store online retail.The company mainly sells unique all-occasion gifts. Many customers of the company are wholesalers.
+
+A few things that we want to look at:
+
+* Sales by day
+* Unit drivers
+* Dollar drivers
+* Orders/order value by country
+
+# Data 
+
+As stated above, we've taken data provided from the UCI Machine Learning Repository. You can find a link to the actual data [here](https://archive.ics.uci.edu/ml/machine-learning-databases/00352/). 
+
+```{r}
+online_retail <-  readxl::read_xlsx("Online Retail.xlsx") ##reads in our data
+
+online_retail <- online_retail %>% ##converts character variables to factor
+  mutate_if(is.character, as.factor) %>% 
+  janitor::clean_names() ## cleans up variable names. 
+```
+
+## Data Cleaning
+
+Let's take a quick first look at our data so we can see what we are dealing with. 
+
+```{r}
+skimr::skim(online_retail)
+```
+
+We have over 540,000 different orders, of which we have 8 different data points on each. 
+We have data on:
+
+* The invoice number
+* The stock code
+* The stock description
+* Country of purchase
+* Quantity purchased
+* Unit price
+* Anonymized customer ID number
+* Invoice date
+
+Most of our data points are fully complete. However we are missing some item descriptions, quite a few (25%) of our customer ID's. These two are not able to be imputed, and we can chalk up to data quality issues. There isn't much that we can do to remedy this. Notice too, that we don't have a total value of individual purchases, or a total dollar value of each invoice. These are important factors to consider. We can pretty simply create these variables. Let's also add in some date variables that we may want to look at. Finally, when we look at our `quantity` tab, we see that the lowest value is -80995. Without being to verify, we must assume that this means that stock was returned to the store. It could be a data quality issue, but we have no way of knowing.
+
+Now that we have looked at our data, it is time to add in some extra variables that will help in our analysis. We will create a new data frame and call it `sales`. 
+
+```{r}
+sales <- online_retail %>%
+  mutate(item_value = unit_price*quantity) %>% 
+  group_by(invoice_no) %>% 
+  mutate(invoice_total_value = sum(item_value)) %>% 
+  ungroup() %>% 
+  mutate(date = date(invoice_date), #adds in the full date, strips time
+         month = month(invoice_date), ## adds invoice month
+         day = day(invoice_date), ## adds invoice day in month (1-31)
+         weekday = wday(invoice_date), ## adds invoice weekday (1-7) need to find if they start week on monday or sunday
+         hour = hour(invoice_date)) %>%  ## adds invoice hour
+    ungroup() %>%
+    filter(!str_detect(description, "^[:lower:]+$"))## Found a bunch of item descriptions that seemed to be one off descriptions like "damaged", "broken" etc.. This function removes those from the data set.
+
+skimr::skim(sales)
+
+```
+
+Looking at our new data frame, we have a lot more data to work with. We can now organize our data in so many different ways, such as hour of day, or day of the week. Speaking of day of the week, It looks like we only have sales day for day 6. Meaning that sales are not processed one day out of the week. We need to know whether Sunday or Monday equates to day 1 of 7.
+
+```{r}
+sales %>% 
+  filter(date == "2010-12-01") %>% 
+  select(date, weekday)
+```
+
+Going back in the calendar, we know that December 1st 2020, starts on a Wednesday. This means that our week starts on Sunday, and by extension, that our store does not process sales on Saturday. 
+
+With our data in a more usable format, and some extra variables added, we can start our exploratory data analysis. 
+
+# Exploratory Data Analysis
+
+## Sales Over Time
+
+First and foremost, let's look at the sales over the year. Let's see if anything stands out right off the top before we get into the nitty gritty. 
+
+```{r}
+sales %>% 
+  group_by(date) %>% 
+  summarise(total = sum(invoice_total_value)) %>% 
+  mutate(flag = ifelse(total >= 8000000, T, F)) %>% 
+  ggplot(aes(date, total)) +
+  geom_col(aes(fill = flag)) +
+  scale_y_continuous(labels = scales::dollar_format()) + 
+  scale_fill_manual(values = c('#595959', 'red'))+
+  scale_x_date(date_breaks = "months" , date_labels = "%b-%y")+
+  theme_minimal()+
+  theme(text = element_text(family = "Nunito Bold", face = "bold"),
+    legend.position = "none",
+    panel.grid.major.x  = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )+
+  labs(
+    title = "Total Sales by Date",
+    x = "",
+    y = ""
+  )
+```
+
+We're looking at a graph of total sales over the year. We've highlighted total sales per day over \$8,000,000. We see a large number of these days in December in both 2010 and 2011. We can assume that December is a big month for this company. We also see a day in August that exceeded \$8,000,000. Let's take a look at that day and see if anything sticks out. 
+
+```{r}
+sales %>% 
+  filter(month == 8) %>% 
+  group_by(date) %>% 
+  summarise(total = sum(invoice_total_value)) %>% 
+  filter(total >= 8000000)
+```
+
+August 11th, 2011 had a total sales of 9.2 million. Let's dive in and see if any orders stand out.
+
+```{r}
+sales %>% 
+  filter(date == "2011-08-11") %>% 
+  group_by(invoice_no) %>% 
+  summarize(total = sum(invoice_total_value)) %>% 
+  arrange(-total) %>% 
+  head(20) %>% 
+  knitr::kable()
+```
+We've got two invoices well over \$200,000. Let's examine those a little bit.
+
+```{r}
+sales %>% 
+  filter(invoice_no == 562955) %>% 
+  head(5) %>% 
+  select(-c(invoice_date, day, month, weekday, hour)) %>% 
+  knitr::kable()
+```
+
+Well this first order, we don't have a customer ID. It would be worth while to find who created this invoice, so we can execute targeted marketing for future repurchases!
+
+```{r}
+sales %>% 
+  filter(invoice_no == 563076) %>% 
+  head(5) %>% 
+  select(-c(invoice_date, day, month, weekday, hour)) %>% 
+  knitr::kable()
+```
+
+This is a big order out of the Netherlands that we do actually have a customer ID for. When we do our analysis on where our buying comes from, we should pay attention to the Netherlands. Perhaps this one buyer makes up a large portion of that countries total buying. 
+
+## Unit Drivers
+
+Let's identify the largest unit drivers over the year. When we look at the data set, when we look at item descriptions with 1 or 2 units, they seem to be either 1 off or just data entry errors. We could process these out, but for the sake of this exercise, I'm going to filter to items that have a total unit value of at least 3.
+
+```{r}
+unit_drivers <- sales %>% 
+  select(description, quantity) %>% 
+  group_by(description) %>% 
+  summarise(total_quantity = sum(quantity)) %>% 
+  filter(total_quantity >3) %>% 
+  ungroup() %>% 
+  arrange(desc(total_quantity)) %>% 
+  head(20)
+
+
+unit_drivers %>% 
+  ggplot(aes(fct_reorder(description, total_quantity), total_quantity, label = total_quantity)) + 
+  geom_col(fill = "#303844")+
+  geom_text(hjust = 1.1, color = "white",fontface = "bold")+
+  coord_flip()+
+  theme_minimal()+
+  theme(text = element_text(family = "Nunito Bold", face = "bold"),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank()
+          )+
+  labs(
+    title = "Unit Drivers",
+    subtitle = "For Calendar Year 2011",
+    x = "",
+    y = "Units"
+  ) -> graph_unit_drivers
+
+graph_unit_drivers
+```
+
+We now have a graph of our top 20 unit drivers for the year 2011. If we can find inefficiencies in our sales process for these units, we can correct for them and increase our sales revenue due to the sheer volume of sales that these units produce. 
+
+## Dollar Drivers
+
+Let's run the same type of analysis and identify our top dollar drivers. 
+
+```{r}
+dollar_drivers <- sales %>% 
+  select(description, invoice_total_value) %>% 
+  group_by(description) %>% 
+  summarise(total_dollars = sum(invoice_total_value)) %>% 
+  ungroup() %>% 
+  mutate(label_text = paste("$",round(total_dollars, digits = 2)),
+         label_text = trimws(label_text))%>% 
+  arrange(desc(total_dollars))%>% 
+  head(20)
+
+dollar_drivers %>% 
+  ggplot(aes(fct_reorder(description, total_dollars), total_dollars, label = label_text)) + 
+  geom_col(fill = "#303844")+
+  geom_text(hjust = 1.1, color = "white",fontface = "bold")+
+  scale_y_continuous(labels=scales::dollar_format())+
+  coord_flip()+
+  theme_minimal()+
+  theme(text = element_text(family = "Nunito Bold", face = "bold"),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank()
+          )+
+  labs(
+    title = "Dollar Drivers",
+    subtitle = "For Calendar Year 2011",
+    x = "",
+    y = ""
+  ) -> graph_dollar_drivers
+
+graph_dollar_drivers
+```
+
+Looking at the two graphs we can see that a few SKU's show up in both the dollar drivers and the unit drivers. For instance the *Party Bunting*, and the *Pack of 72 Retrospot Cake Cases*. It is safe to say that these two SKU's make up an important part of the business.
+
+
+## Where in the World Are Our Sales?
+
+```{r}
+sales_by_country <- sales %>% 
+  select(country, invoice_total_value) %>%
+  group_by(country) %>% 
+  summarise(total_sales_by_country = sum(invoice_total_value)) 
+
+
+sales_by_country %>% 
+  arrange(desc(total_sales_by_country)) %>% 
+  gt() %>% 
+  fmt_currency(
+    # Define the columns to change
+    columns = vars(total_sales_by_country),
+    # How many decimals to round to
+    decimals = 2,
+  ) %>%
+  # Align the now character column to be right-aligned
+  cols_align(
+    align = "right",
+    columns = vars(total_sales_by_country)) %>% 
+  cols_label(
+    total_sales_by_country = "Total Sales",
+    country = "Country"
+  )  %>%
+  tab_header(
+    title = md("**Sales by Country**"),
+    subtitle = "2011"
+  )
+  
+
+```
+
+The vast, vast majority of the yearly sales came from the UK. Considering that this business is based there, that makes sense. Looking at our lowest value countries, We have Saudi Arabia, Bahrain and The Czech Republic. If there is marketing dollars being spent there currently, it may be wise to move it else where. 
+
+
+# Wrap Up
+
+We took a look at our sales data from this anonymized store data set. We look at unit drivers, dollar drivers and which countries produced the most sales. In the future it would be beneficial to examine customer segmentation, perhaps utilizing KNN. I will save that for a future blog post however.
+
+
+
